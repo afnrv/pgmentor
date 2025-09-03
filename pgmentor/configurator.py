@@ -1,5 +1,5 @@
 from typing import List, Tuple, Dict
-from pgmentor.linux_helpers import fmt_bytes, read_first, numa_nodes, numa_bal, calc_need_hp, get_governor, parse_meminfo_kb
+from pgmentor.linux_helpers import fmt_bytes, read_first, numa_nodes, numa_bal, calc_need_hp, get_governor, parse_meminfo_kb, get_os, hp_info
 from pgmentor.metrics import Metrics
 from pgmentor.output import h1, print_kv_table
 import shlex
@@ -193,20 +193,34 @@ def print_query(pg: Pg, sql: str) -> None:
 
 
 def run_all_sections(pg: Pg) -> None:
+    # Prepare both variants to be resilient across PG versions
+    ckpt_sql_checkpointer = """
+        SELECT
+          num_timed              AS timed_ckpt,
+          num_requested          AS req_ckpt,
+          round(num_requested*100.0/NULLIF(num_timed+num_requested,0),1) AS "req_%",
+          buffers_written        AS buf_ckpt,
+          (SELECT buffers_clean FROM pg_stat_bgwriter)         AS buf_bgwriter,
+          NULL::bigint           AS buf_backend,
+          NULL::bigint           AS backend_fsync,
+          (SELECT buffers_alloc FROM pg_stat_bgwriter)         AS buf_alloc
+        FROM pg_stat_checkpointer;
+    """
+    ckpt_sql_bgwriter = """
+        SELECT
+          NULL::bigint            AS timed_ckpt,
+          NULL::bigint            AS req_ckpt,
+          NULL::numeric           AS "req_%",
+          NULL::bigint            AS buf_ckpt,
+          buffers_clean           AS buf_bgwriter,
+          buffers_backend         AS buf_backend,
+          buffers_backend_fsync   AS backend_fsync,
+          buffers_alloc           AS buf_alloc
+        FROM pg_stat_bgwriter;
+    """
+
     sections: List[Tuple[str, str]] = [
-        ("2) Checkpoint & bgwriter",
-         """
-         SELECT
-           checkpoints_timed        AS timed_ckpt,
-           checkpoints_req          AS req_ckpt,
-           round(checkpoints_req*100.0/NULLIF(checkpoints_timed+checkpoints_req,0),1) AS "req_%",
-           buffers_checkpoint        AS buf_ckpt,
-           buffers_clean             AS buf_bgwriter,
-           buffers_backend           AS buf_backend,
-           buffers_backend_fsync     AS backend_fsync,
-           buffers_alloc             AS buf_alloc
-         FROM pg_stat_bgwriter;
-         """),
+        ("2) Checkpoint & bgwriter", "__CKPT__"),
         ("3) HOT updates (low %)",
          """
          SELECT schemaname||'.'||relname        AS table,
@@ -386,7 +400,14 @@ def run_all_sections(pg: Pg) -> None:
             for k, v in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:10]:
                 print(f"{k:25} | {v}")
         else:
-            # allow multiple statements separated by ;
-            stmts = [s.strip() for s in sql.strip().split(";") if s.strip()]
-            for st in stmts:
-                print_query(pg, st + ";")
+            if sql == "__CKPT__":
+                # Try pg_stat_checkpointer first (PG16+), fall back to bgwriter
+                try:
+                    print_query(pg, ckpt_sql_checkpointer)
+                except Exception:
+                    print_query(pg, ckpt_sql_bgwriter)
+            else:
+                # allow multiple statements separated by ;
+                stmts = [s.strip() for s in sql.strip().split(";") if s.strip()]
+                for st in stmts:
+                    print_query(pg, st + ";")

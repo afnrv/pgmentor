@@ -26,20 +26,49 @@ def gather_metrics(pg: Pg) -> Metrics:
     except Exception:
         pass
 
-    # HITR и CKPT_F
-    hitr, ckpt_f = pg.qrow(
+    # HITR (buffer cache hit ratio)
+    hitr_val = pg.qval(
         """
         WITH hr AS (
           SELECT 100*sum(blks_hit)/NULLIF(sum(blks_hit)+sum(blks_read),0)::numeric h
           FROM pg_stat_database WHERE blks_hit+blks_read>0)
-        SELECT COALESCE(ROUND(h,1),0),
-               (SELECT COALESCE(EXTRACT(EPOCH FROM now()-stats_reset)/
-                       NULLIF(checkpoints_timed+checkpoints_req,0),0)
-                FROM pg_stat_bgwriter)
-        FROM hr;
+        SELECT COALESCE(ROUND(h,1),0) FROM hr;
         """
-    ) or (0.0, 0.0)
-    CKPT_SEC = int(float(ckpt_f))
+    )
+    try:
+        hitr = float(hitr_val) if hitr_val is not None else 0.0
+    except Exception:
+        hitr = 0.0
+
+    # CKPT_SEC (средний интервал между чекпойнтами)
+    ckpt_seconds = 0.0
+    # PG16+: pg_stat_checkpointer
+    try:
+        val = pg.qval(
+            """
+            SELECT COALESCE(EXTRACT(EPOCH FROM now()-stats_reset)/
+                   NULLIF(num_timed+num_requested,0),0)
+            FROM pg_stat_checkpointer;
+            """
+        )
+        if val is not None:
+            ckpt_seconds = float(val)
+    except Exception:
+        # older PG: pg_stat_bgwriter
+        try:
+            val = pg.qval(
+                """
+                SELECT COALESCE(EXTRACT(EPOCH FROM now()-stats_reset)/
+                       NULLIF(checkpoints_timed+checkpoints_req,0),0)
+                FROM pg_stat_bgwriter;
+                """
+            )
+            if val is not None:
+                ckpt_seconds = float(val)
+        except Exception:
+            ckpt_seconds = 0.0
+
+    CKPT_SEC = int(ckpt_seconds)
 
     # p90 sort/hash через pg_stat_statements
     SORT_MB = 16
