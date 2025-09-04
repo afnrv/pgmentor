@@ -18,6 +18,15 @@ class Pg:
                 self.conn.close()
         finally:
             self.conn = None
+    
+    def begin(self):
+        self.conn.autocommit = False
+    
+    def rollback(self):
+        self.conn.rollback()
+    
+    def commit(self):
+        self.conn.commit()
 
     def qval(self, sql: str, params: Optional[Sequence[Any]] = None) -> Optional[Any]:
         with self.conn.cursor() as cur:
