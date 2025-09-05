@@ -154,19 +154,95 @@ PARAMS = [
 
 
 def build_reco(pg: Pg, m: Metrics, profile: str) -> List[Tuple[str, str, str]]:
-    rows: List[Tuple[str, str, str]] = [("parameter", "rec", "why")]
+    rows: List[Tuple[str, str, str, str, str]] = [("parameter", "rec", "why", "priority", "speedup")]
+
+    def parse_with_unit(val_str: str, unit: Optional[str]) -> float:
+        if val_str is None:
+            return 0.0
+        try:
+            # Numeric fast-path
+            return float(val_str)
+        except Exception:
+            pass
+        # Non-numeric or has unit suffix in pg_settings (we'll rely on unit column)
+        if not unit:
+            return 0.0
+        try:
+            v = float(val_str)
+            return v
+        except Exception:
+            return 0.0
+
+    def estimate_priority_and_speedup(param: str, cur_str: Optional[str], rec_str: str, unit: Optional[str]) -> Tuple[str, str]:
+        # Default
+        priority = "low"
+        speed = 0
+
+        # Try to get numeric delta where it makes sense
+        cur_num = parse_with_unit(cur_str or "0", unit)
+        try:
+            rec_num = float(rec_str) if rec_str.replace('.', '', 1).isdigit() else cur_num
+        except Exception:
+            rec_num = cur_num
+        delta_ratio = 0.0
+        if cur_num > 0:
+            try:
+                delta_ratio = max(0.0, (rec_num - cur_num) / cur_num)
+            except Exception:
+                delta_ratio = 0.0
+
+        # Heuristics by parameter
+        if param in ("work_mem",):
+            if rec_num > cur_num:
+                priority = "high" if delta_ratio >= 0.5 else "medium"
+                speed = 10 if delta_ratio >= 1.0 else (7 if delta_ratio >= 0.5 else 3)
+        elif param in ("shared_buffers", "effective_cache_size"):
+            if rec_num > cur_num:
+                priority = "medium"
+                speed = 5 if delta_ratio >= 0.5 else 2
+        elif param in ("random_page_cost",):
+            # On SSD lowering cost can help planner
+            priority = "medium"
+            speed = 3
+        elif param in ("effective_io_concurrency",):
+            priority = "medium"
+            speed = 3
+        elif param in ("checkpoint_timeout", "min_wal_size", "max_wal_size", "wal_buffers", "checkpoint_completion_target"):
+            priority = "medium"
+            speed = 2
+        elif param in ("jit",):
+            # For OLTP JIT off tends to help latency
+            priority = "medium" if profile == "oltp" else "low"
+            speed = 2 if profile == "oltp" else 1
+        elif param in ("synchronous_commit",):
+            # remote_write for OLTP can improve throughput with acceptable durability trade-offs
+            priority = "medium"
+            speed = 3
+        elif param in ("wal_compression",):
+            priority = "low"
+            speed = 1
+        elif param.startswith("autovacuum_") or param.startswith("log_") or param in ("track_io_timing",):
+            priority = "low"
+            speed = 0
+
+        # Boundaries
+        speed = max(0, min(20, int(speed)))
+        return priority, f"{speed}%"
+
     for p in PARAMS:
         v = raw_value(p, m, profile, pg)
         if v is None:
             continue
         unit = pg.qval("SELECT unit FROM pg_settings WHERE name=%s;", (p,))
+        cur = pg.qval("SELECT setting FROM pg_settings WHERE name=%s;", (p,))
         if unit:
             try:
                 mb = int(v)
-                rec = str(to_unit(mb, unit))
+                rec_val = str(to_unit(mb, unit))
             except Exception:
-                rec = str(v)
+                rec_val = str(v)
         else:
-            rec = str(v)
-        rows.append((p, rec, note(p)))
+            rec_val = str(v)
+        priority, speedup = estimate_priority_and_speedup(p, str(cur) if cur is not None else None, rec_val, unit)
+        rows.append((p, rec_val, note(p), priority, speedup))
     return rows

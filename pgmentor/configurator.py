@@ -1,11 +1,7 @@
 from typing import List, Tuple, Dict
-from pgmentor.linux_helpers import fmt_bytes, read_first, numa_nodes, numa_bal, calc_need_hp, get_governor, parse_meminfo_kb, get_os, hp_info
 from pgmentor.metrics import Metrics
 from pgmentor.output import h1, print_kv_table
-import shlex
 import time
-import os
-import re
 from pgmentor.db import Pg
 from pgmentor.pgparams import build_reco
 from psycopg2.extras import execute_values
@@ -16,8 +12,8 @@ def section_pg_params(pg: Pg, m: Metrics, profile: str, out_file: str | None) ->
     # build temp table reco
     rows = build_reco(pg, m, profile)
     with pg.conn.cursor() as cur:
-        cur.execute("CREATE TEMP TABLE reco(parameter text, rec text, why text);")
-        execute_values(cur, "INSERT INTO reco(parameter, rec, why) VALUES %s", rows[1:])
+        cur.execute("CREATE TEMP TABLE reco(parameter text, rec text, why text, priority text, speedup text);")
+        execute_values(cur, "INSERT INTO reco(parameter, rec, why, priority, speedup) VALUES %s", rows[1:])
         pg.conn.commit()
 
     sql = """
@@ -26,6 +22,8 @@ def section_pg_params(pg: Pg, m: Metrics, profile: str, out_file: str | None) ->
              s.setting::text                        AS cur,
              r.rec                                  AS rec,
              r.why                                  AS why,
+             r.priority                             AS priority,
+             r.speedup                               AS speedup,
              s.context,
              (s.setting::text <> r.rec)::bool       AS differs,
              (s.context = 'postmaster')::bool       AS needs_restart,
@@ -41,22 +39,26 @@ def section_pg_params(pg: Pg, m: Metrics, profile: str, out_file: str | None) ->
       FROM pg_settings s
       JOIN reco r ON r.parameter = s.name
     )
-    SELECT name, cur, rec, CASE WHEN differs THEN scope ELSE 'ok' END AS action, why
+    SELECT name, cur, rec,
+           CASE WHEN differs THEN scope ELSE 'ok' END AS action,
+           why,
+           priority,
+           speedup
     FROM diff
-    ORDER BY differs DESC, name;
+    ORDER BY differs DESC, priority DESC, name;
     """
     rows_out = pg.qall(sql)
 
-    tbl: List[Tuple[str, str, str, str, str]] = []
-    for name, cur, rec, action, why in rows_out:
-        tbl.append((str(name).ljust(32), str(cur).ljust(12), str(rec).ljust(12), action, why))
+    tbl: List[Tuple[str, str, str, str, str, str, str]] = []
+    for name, cur, rec, action, why, priority, speedup in rows_out:
+        tbl.append((str(name).ljust(32), str(cur).ljust(12), str(rec).ljust(12), action, why, priority, speedup))
     print_kv_table(tbl)
 
     # Write recommended ALTER SYSTEM statements to file if requested
     if out_file:
         stmts: List[str] = []
         # Only include settings that differ from current values
-        for name, cur, rec, action, _why in rows_out:
+        for name, cur, rec, action, _why, _priority, _speedup in rows_out:
             if action != 'ok':
                 # escape single quotes in value
                 val = str(rec).replace("'", "''")
@@ -122,7 +124,27 @@ def run_all_sections(pg: Pg) -> None:
 
     sections: List[Tuple[str, str]] = [
         ("2) Checkpoint & bgwriter", "__CKPT__"),
-        ("3) HOT updates (low %)",
+        ("3) Large tables for partitioning (>20GB)",
+        """
+        SELECT 
+            schemaname || '.' || relname AS table_name,
+            pg_size_pretty(pg_total_relation_size(relid)) AS total_size,
+            pg_size_pretty(pg_relation_size(relid)) AS table_size,
+            pg_size_pretty(
+                (pg_total_relation_size(relid)::bigint - pg_relation_size(relid)::bigint)
+            ) AS index_size,
+            n_live_tup AS live_rows,
+            n_dead_tup AS dead_rows,
+            round(n_dead_tup*100.0/NULLIF(n_live_tup+n_dead_tup,0),1) AS dead_pct,
+            seq_scan,
+            idx_scan,
+            round(idx_scan*100.0/NULLIF(seq_scan+idx_scan,0),1) AS idx_scan_pct
+        FROM pg_stat_user_tables
+        WHERE pg_total_relation_size(relid) > 20 * 1024 * 1024 * 1024
+        ORDER BY pg_total_relation_size(relid) DESC
+        LIMIT 20;
+        """),
+        ("4) HOT updates (low %)",
          """
          SELECT schemaname||'.'||relname        AS table,
                 n_tup_upd                       AS upd,
@@ -133,7 +155,7 @@ def run_all_sections(pg: Pg) -> None:
          ORDER BY hot_pct NULLS FIRST
          LIMIT 20;
          """),
-        ("4) Seq vs Index scan",
+        ("5) Seq vs Index scan",
          """
          SELECT schemaname||'.'||relname                          AS table,
                 seq_scan, idx_scan,
@@ -144,7 +166,7 @@ def run_all_sections(pg: Pg) -> None:
          ORDER BY seq_scan DESC
          LIMIT 20;
          """),
-        ("5) Duplicate indexes",
+        ("6) Duplicate indexes",
          """
          WITH sig AS (
            SELECT i.indexrelid,
@@ -159,7 +181,7 @@ def run_all_sections(pg: Pg) -> None:
          HAVING COUNT(*) > 1
          ORDER BY SUM(pg_relation_size(indexrelid)) DESC;
          """),
-        ("6) FK without indexes",
+        ("7) FK without indexes",
          """
          WITH fk AS (
            SELECT conrelid, conname, conkey, confrelid
@@ -187,7 +209,7 @@ def run_all_sections(pg: Pg) -> None:
          FROM mis
          ORDER BY child_table;
          """),
-        ("7) Big tables without PK",
+        ("8) Big tables without PK",
          """
          SELECT c.relname                 AS table,
                 pg_size_pretty(pg_total_relation_size(c.oid)) AS total,
@@ -201,7 +223,7 @@ def run_all_sections(pg: Pg) -> None:
          ORDER BY pg_total_relation_size(c.oid) DESC
          LIMIT 20;
          """),
-        ("8) Unused indexes",
+        ("9) Unused indexes",
          """
          SELECT schemaname||'.'||relname        AS table,
                 indexrelname                    AS index,
@@ -215,7 +237,7 @@ def run_all_sections(pg: Pg) -> None:
          ORDER BY pg_relation_size(indexrelid) DESC
          LIMIT 20;
          """),
-        ("9) Dead-tuples / bloat",
+        ("10) Dead-tuples / bloat",
          """
          SELECT schemaname||'.'||relname                     AS table,
                 n_live_tup, n_dead_tup,
@@ -226,7 +248,7 @@ def run_all_sections(pg: Pg) -> None:
          ORDER BY dead_pct DESC
          LIMIT 20;
          """),
-        ("10) Temp-files usage",
+        ("11) Temp-files usage",
          """
          SELECT datname,
                 temp_files,
@@ -236,7 +258,7 @@ def run_all_sections(pg: Pg) -> None:
          ORDER BY temp_bytes DESC
          LIMIT 15;
          """),
-        ("11) XID freeze age (databases)",
+        ("12) XID freeze age (databases)",
          """
          WITH cur AS (SELECT txid_current()::bigint AS nowxid)
          SELECT datname,
@@ -245,7 +267,7 @@ def run_all_sections(pg: Pg) -> None:
          FROM pg_database, cur
          ORDER BY age_xid DESC;
          """),
-        ("11) XID freeze age (tables)",
+        ("13) XID freeze age (tables)",
          """
          WITH cur AS (SELECT txid_current()::bigint AS nowxid)
          SELECT s.schemaname||'.'||s.relname         AS table,
@@ -256,8 +278,8 @@ def run_all_sections(pg: Pg) -> None:
          ORDER BY age_xid DESC
          LIMIT 15;
          """),
-        ("12) Wait events snapshot (0.5s)", "SNAP_WAIT"),
-        ("13) Replication lag (slots)",
+        ("14) Wait events snapshot (0.5s)", "SNAP_WAIT"),
+        ("15) Replication lag (slots)",
          """
          SELECT slot_name,
                 wal_status,
@@ -265,7 +287,7 @@ def run_all_sections(pg: Pg) -> None:
                 active
          FROM pg_replication_slots;
          """),
-        ("14) Extensions",
+        ("16) Extensions",
          """
          SELECT e.extname,
                 e.extversion,
@@ -274,12 +296,12 @@ def run_all_sections(pg: Pg) -> None:
          JOIN pg_namespace n ON n.oid = e.extnamespace
          ORDER BY e.extname;
          """),
-        ("15) HugePages / Shared memory",
+        ("17) HugePages / Shared memory",
          """
          SELECT name, setting FROM pg_settings
          WHERE name IN ('huge_pages','huge_page_size','shared_memory_type');
          """),
-        ("16) Archiving / pg_wal size",
+        ("18) Archiving / pg_wal size",
          """
          SELECT setting AS archive_mode      FROM pg_settings WHERE name='archive_mode';
          SELECT setting AS archive_command   FROM pg_settings WHERE name='archive_command';
