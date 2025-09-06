@@ -1,7 +1,14 @@
 from typing import Any, Optional, List, Tuple
 from pgmentor.metrics import Metrics
 from pgmentor.db import Pg
-from pgmentor.linux_helpers import to_unit
+
+def to_unit(mb: int, unit: str) -> int:
+    if unit == "kB":
+        return mb * 1024
+    if unit == "8kB":
+        # В pg_settings unit="8kB" означает блоки по 8 KiB
+        return mb * 1024 // 8
+    return mb
 
 def note(p: str) -> str:
     notes = {

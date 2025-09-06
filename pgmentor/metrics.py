@@ -1,7 +1,23 @@
 from dataclasses import dataclass
-from pgmentor.linux_helpers import parse_meminfo_kb, read_first
 from pgmentor.db import Pg
 import os
+
+def parse_meminfo_kb(key: str) -> int:
+    try:
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                if line.startswith(key):
+                    return int(line.split()[1])
+    except Exception:
+        pass
+    return 0
+def read_first(path: str, default: str = "n/a") -> str:
+    try:
+        with open(path, "r") as f:
+            return f.read().strip()
+    except Exception:
+        return default
+    
 @dataclass
 class Metrics:
     RAM_MB: int
