@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel", "build"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pgmentor"
+version = "0.1.0"
+description = "A CLI tool for PostgreSQL query analysis and optimization"
+readme = "README.md"
+authors = [{ name = "Artem Finarev", email = "artyom310300@gmail.com" }]
+license = { text = "MIT" }
+dependencies = [
+    "psycopg2-binary",
+    "openai",
+]
+requires-python = ">=3.9"
+
+[project.scripts]
+pgmentor = "pgmentor.cli:main"
