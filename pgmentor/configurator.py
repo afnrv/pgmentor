@@ -140,7 +140,7 @@ def run_all_sections(pg: Pg) -> None:
             idx_scan,
             round(idx_scan*100.0/NULLIF(seq_scan+idx_scan,0),1) AS idx_scan_pct
         FROM pg_stat_user_tables
-        WHERE pg_total_relation_size(relid) > 20 * 1024 * 1024 * 1024
+        WHERE pg_total_relation_size(relid) > (20::bigint * 1024 * 1024 * 1024)
         ORDER BY pg_total_relation_size(relid) DESC
         LIMIT 20;
         """),

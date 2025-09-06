@@ -163,3 +163,73 @@ def optimize_query(query: str) -> str:
         return f"Error accessing AI: {e}."  
     
     return reply
+
+def make_recommendations(query: str, rows_out: int, mean_time: float, blks_read: int) -> list[str]:
+    recs = []
+    q = query.lower()
+
+    # General
+    if "select *" in q:
+        recs.append("Avoid SELECT * — use explicit column list to reduce data volume.")
+
+    if "order by" in q and "limit" not in q:
+        recs.append("Add LIMIT when using ORDER BY to reduce sorting cost.")
+
+    if blks_read > 1000 and "where" in q and "index" not in q:
+        recs.append("Query reads too many blocks — consider adding an index on the WHERE condition.")
+
+    if rows_out > 1_000_000:
+        recs.append("Query returns too many rows — consider pagination or aggregation.")
+
+    if mean_time > 100:  # >100ms avg time
+        recs.append("Query is slow — consider caching or rewriting it.")
+
+    # Joins
+    if "join" in q:
+        if "nested loop" in q:
+            recs.append("Nested Loop Join detected — consider adding indexes or forcing Hash/Merge Join.")
+        if "join" in q and " on " not in q:
+            recs.append("JOIN without explicit ON condition detected — may produce Cartesian product.")
+        if "select *" in q and q.count("join") > 1:
+            recs.append("Multiple JOINs with SELECT * — select only required columns to reduce memory usage.")
+
+    return recs
+
+
+def analyze_stats(pg):
+    """
+    Analyze pg_stat_statements for slow queries and generate recommendations.
+    """
+    sql = """
+    SELECT query,
+           calls,
+           total_exec_time,
+           mean_exec_time,
+           rows,
+           shared_blks_hit,
+           shared_blks_read
+    FROM pg_stat_statements
+    ORDER BY mean_exec_time DESC
+    LIMIT 20;
+    """
+    rows = pg.qall(sql)
+
+    report = "\n" + "="*60 + "\n"
+    report += "Top slow queries from pg_stat_statements\n"
+    report += "="*60 + "\n"
+
+    for r in rows:
+        query, calls, total_time, mean_time, rows_out, blks_hit, blks_read = r
+        report += f"Query: {query.strip()[:200]}...\n"
+        report += f"  Calls: {calls}\n"
+        report += f"  Total time: {total_time:.2f} ms, Avg: {mean_time:.2f} ms\n"
+        report += f"  Rows: {rows_out}\n"
+        report += f"  Buffers: hit={blks_hit}, read={blks_read}\n"
+
+        recs = make_recommendations(query, rows_out, mean_time, blks_read)
+        if recs:
+            report += "  Recommendations:\n"
+            for rec in recs:
+                report += f"    - {rec}\n"
+        report += "\n"
+    return report
