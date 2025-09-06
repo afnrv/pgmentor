@@ -24,16 +24,23 @@ A comprehensive CLI tool for PostgreSQL query analysis and optimization that pro
 
 ## Installation
 
-### From PyPI (when available)
-```bash
-pip install pgmentor
-```
-
 ### From Source
 ```bash
 git clone https://github.com/yourusername/pgmentor.git
 cd pgmentor
 pip install -e .
+```
+
+### From virtual environment
+```bash
+# Create virtual environment
+python3 -m venv ~/pgmentor-venv
+
+# Activate it
+source ~/pgmentor-venv/bin/activate
+
+# Install wheel
+pip install ~/pgmentor/pgmentor/dist/pgmentor-0.1.0-py3-none-any.whl
 ```
 
 ## Dependencies
