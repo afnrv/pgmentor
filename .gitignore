@@ -1,1 +1,3 @@
 pgmentor/__pycache__/
+dist/
+pgmentor.egg-info/
